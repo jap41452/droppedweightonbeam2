@@ -49,6 +49,23 @@
     .legend { font-size: 12px; color:#333; margin-top:4px; max-width: 800px; }
 
     .busy { pointer-events: none; }
+
+    /* ---- Center all main 800px-wide blocks ---- */
+    h2,
+    .toolbar,
+    .results,
+    .legend,
+    #beamCanvas,
+    #timePlot,
+    #animCanvas {
+      max-width: 800px;
+      margin: 0 auto;      /* centers inside wider container */
+    }
+
+    /* small vertical padding so content isn't hard against iframe edge */
+    body {
+      padding: 4px 0;
+    }
   </style>
 </head>
 <body>
@@ -65,29 +82,24 @@
   </div>
 
   <div class="toolbar" id="row2">
-  <label><span class="field-text">Gravity (G):</span> <input id="gravityInput" type="number" value="386"></label>
-  <label><span class="field-text">Δt (s):</span> <input id="dtInput" type="number" min="1e-6" step="0.0001" value="0.001" style="width:64px"></label>
-  <label><span class="field-text">T (s):</span> <input id="durInput" type="number" min="0.01" step="0.01" value="1.5" style="width:64px"></label>
+    <label><span class="field-text">Gravity (G):</span> <input id="gravityInput" type="number" value="386"></label>
+    <label><span class="field-text">Δt (s):</span> <input id="dtInput" type="number" min="1e-6" step="0.0001" value="0.001" style="width:64px"></label>
+    <label><span class="field-text">T (s):</span> <input id="durInput" type="number" min="0.01" step="0.01" value="1.5" style="width:64px"></label>
 
-  <label><span class="field-text">Impact:</span>
-    <select id="impactMode">
-      <option value="stick">Stick (e=0)</option>
-      <option value="bounce">Bounce (e&gt;0)</option>
-    </select>
-  </label>
-  <label><span class="field-text">e:</span> <input id="eInput" type="number" min="0" max="1" step="0.01" value="0.5" style="width:54px"></label>
-  <label><span class="field-text">ζ (%):</span> <input id="zetaInput" type="number" min="0" step="0.1" value="2.0" style="width:54px"></label>
-</div>
+    <label><span class="field-text">Impact:</span>
+      <select id="impactMode">
+        <option value="stick">Stick (e=0)</option>
+        <option value="bounce">Bounce (e&gt;0)</option>
+      </select>
+    </label>
+    <label><span class="field-text">e:</span> <input id="eInput" type="number" min="0" max="1" step="0.01" value="0.5" style="width:54px"></label>
+    <label><span class="field-text">ζ (%):</span> <input id="zetaInput" type="number" min="0" step="0.1" value="2.0" style="width:54px"></label>
+  </div>
 
-<!-- New row just for the buttons -->
-<div class="toolbar" id="row3">
-  <button id="btnDrop">Simulate Drop</button>
-  <button id="btnExport">Export CSV</button>
-</div>
-  
-
-
-
+  <div class="toolbar" id="row3">
+    <button id="btnDrop">Simulate Drop</button>
+    <button id="btnExport">Export CSV</button>
+  </div>
 
   <canvas id="beamCanvas" width="800" height="220"></canvas>
   <div id="dropSummary" class="results"></div>
@@ -651,7 +663,7 @@ function simulateDrop(){
     const y4  = y.map((yj,j)=> yj  + dt*k3y[j]);
     const yd4 = yd.map((vj,j)=> vj + dt*k3yd[j]);
     const k4y  = yd4;
-    const k4yd = y4.map((yj,j)=> sdofAcc(j, y4[j], yd4[j]));
+    const k4yd = y4.map((vj,j)=> sdofAcc(j, y4[j], yd4[j]));
 
     for (let j=0;j<p;j++){
       y[j]  += (dt/6)*(k1y[j]  + 2*k2y[j]  + 2*k3y[j]  + k4y[j]);
@@ -942,5 +954,6 @@ if (typeof ResizeObserver !== "undefined") {
 
 </body>
 </html>
+
 
 

@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Beam Drop Response (RK4)</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/numeric/1.2.6/numeric.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css">
+  <style>
+    /* Prevent any scrollbars from internal overflow and keep full width */
+    html, body {
+      margin: 0;
+      padding: 0;
+      max-width: 100%;
+      overflow-x: hidden;   /* no horizontal scroll inside iframe */
+      background: #f4f4f4;
+      font-family: sans-serif;
+    }
+
+    #beamCanvas { border: 1px solid #ccc; margin-top: 12px; cursor: pointer; background: #fff; }
+    .swal2-popup { font-size: 12px !important; width: auto !important; min-width: 220px !important; }
+    .swal2-input, .swal2-select { font-size: 12px !important; width: 90px !important; margin: 4px !important; }
+    .swal2-html-container label { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .swal2-html-container label span { margin-right: 8px; }
+
+    .toolbar { 
+      display: grid; 
+      grid-auto-flow: column; 
+      grid-auto-columns: max-content; 
+      grid-template-columns: repeat(12, max-content); 
+      gap: 4px; 
+      align-items: center; 
+      max-width: 980px; 
+    }
+    .toolbar label { display: inline-flex; align-items: center; gap: 6px; color: #000 !important; text-indent: 0 !important; }
+    .toolbar label::before { content: none !important; }
+    .toolbar label .field-text { color:#000 !important; font-size:14px !important; display:inline !important; }
+    .toolbar input[type=number], .toolbar input[type=text], .toolbar select, .toolbar input[type=range], .toolbar button { height: 24px; }
+    .toolbar input[type=number], .toolbar input[type=text] { width: 56px; padding: 2px 4px; line-height: 24px; }
+    #numSegments { width: 52px; }
+    #gravityInput { width: 60px !important; }
+    .toolbar button { padding: 3px 8px; font-size: 12px; line-height: 1.1; }
+    #btnAnimToggle { padding: 3px 6px; width: auto; min-width: 0; }
+
+    .results { margin-top: 6px; font-size: 14px; max-width: 980px; }
+    .muted { color:#666; font-size: 12px; }
+    .modeCanvas { display:block; margin: 10px 0; border: 1px solid #ccc; background:#fff; }
+    .legend { font-size: 12px; color:#333; margin-top:4px; max-width: 980px; }
+
+    .busy { pointer-events: none; }
+  </style>
+</head>
+<body>
+  <h2>Beam Drop Response (RK4)</h2>
+
+  <div class="toolbar" id="row1">
+    <label><span class="field-text">Segments (max 10):</span> <input id="numSegments" type="number" min="1" max="10" value="4"></label>
+    <button id="btnBuild">Build Beam</button>
+    <button id="btnFreq">1st Mode Freq</button>
+    <!-- New output box for 1st mode frequency -->
+    <label><span class="field-text">f₁ (Hz):</span>
+      <input id="freqOutput" type="text" readonly style="width:70px; text-align:right;">
+    </label>
+  </div>
+
+  <div class="toolbar" id="row2">
+    <label><span class="field-text">Gravity (G):</span> <input id="gravityInput" type="number" value="386"></label>
+    <label><span class="field-text">Δt (s):</span> <input id="dtInput" type="number" min="1e-6" step="0.0001" value="0.001" style="width:64px"></label>
+    <label><span class="field-text">T (s):</span> <input id="durInput" type="number" min="0.01" step="0.01" value="1.5" style="width:64px"></label>
+
+    <label><span class="field-text">Impact:</span>
+      <select id="impactMode">
+        <option value="stick">Stick (e=0)</option>
+        <option value="bounce">Bounce (e&gt;0)</option>
+      </select>
+    </label>
+    <label><span class="field-text">e:</span> <input id="eInput" type="number" min="0" max="1" step="0.01" value="0.5" style="width:54px"></label>
+    <label><span class="field-text">ζ (%):</span> <input id="zetaInput" type="number" min="0" step="0.1" value="2.0" style="width:54px"></label>
+
+    <button id="btnDrop">Simulate Drop</button>
+    <button id="btnExport">Export CSV</button>
+  </div>
+
+  <canvas id="beamCanvas" width="980" height="220"></canvas>
+  <div id="dropSummary" class="results"></div>
+  <canvas id="timePlot" width="980" height="260" class="modeCanvas"></canvas>
+
+  <div class="toolbar" style="grid-template-columns:auto auto auto; align-items:center; gap:8px; margin-top:4px; max-width:980px;">
+    <button id="btnAnimToggle">Play</button>
+    <label style="align-items:center"><span class="field-text">Speed:</span>
+      <input id="animSpeed" type="range" min="0.01" max="1" step="0.01" value="0.5" style="width:140px"></label>
+    <span id="animStatus" class="muted"></span>
+  </div>
+  <canvas id="animCanvas" width="980" height="240" class="modeCanvas"></canvas>
+  <div class="legend">Blue line: beam deflection; Black filled circle: dropped mass (attached for stick; free-flight for bounce). Damping: modal (structural) with uniform ζ.</div>
+
+<script>
+// ===== Config & State =====
+const INTERNAL_NODES_PER_SEG = 10; // fixed refinement
+const MARGIN_X = 70; // shared side margin
+
+let segments = [];
+let nodes = [];      // primary nodes only (length = S+1)
+let timeChart = null;
+let beamCanvasEl = null;
+let isDrawing = false;
+let isEditing = false;
+let canvasClickHandler = null;
+let suppressClicksUntil = 0;
+
+function getRefine(){ return INTERNAL_NODES_PER_SEG; }
+function safeDrawBeam(){ requestAnimationFrame(drawBeam); }
+
+// storage for latest simulation (for CSV)
+let lastSim = null; // { ts:[], wDrop:[], nodeNames:[], nodeW: [ [..step..] per node] }
+
+// ===== Build / Draw =====
+function buildBeam() {
+  const S = Math.max(1, Math.min(10, parseInt(document.getElementById("numSegments").value)));
+  const totalL = 96; // default total length
+  segments = [];
+  for (let i = 0; i < S; i++) {
+    segments.push({ E: 12e6, I: 21.3, L: totalL / S, rho: 0.28, A: 2.0 });
+  }
+  nodes = Array(S + 1).fill().map(() => ({ bc: "free", W: 0, Kv: 0, Kr: 0, H: 0 }));
+  safeDrawBeam();
+  renderDropSummary(null);
+  drawTimeHistory([], []);
+  lastSim = null;
+  const outEl = document.getElementById('freqOutput');
+  if (outEl) outEl.value = '';
+}
+
+// --- Segment editor ---
+async function editSegment(i){
+  if (isEditing) return;
+  isEditing = true; toggleCanvasBusy(true);
+  try {
+    const s = segments[i];
+    const { value: data } = await Swal.fire({
+      title: `Segment ${i} Properties`,
+      html:
+        `<label><span>E:</span><input id="segE" class="swal2-input" value="${s.E}"></label>
+         <label><span>I:</span><input id="segI" class="swal2-input" value="${s.I}"></label>
+         <label><span>L:</span><input id="segL" class="swal2-input" value="${s.L}"></label>
+         <label><span>ρ:</span><input id="segRho" class="swal2-input" value="${s.rho}"></label>
+         <label><span>A:</span><input id="segA" class="swal2-input" value="${s.A}"></label>`,
+      focusConfirm:false,
+      preConfirm:()=>[
+        parseFloat(document.getElementById('segE').value),
+        parseFloat(document.getElementById('segI').value),
+        parseFloat(document.getElementById('segL').value),
+        parseFloat(document.getElementById('segRho').value),
+        parseFloat(document.getElementById('segA').value)
+      ]
+    });
+    if (data){
+      const [E,I,L,rho,A] = data.map(v=> (isFinite(v)? v:0));
+      segments[i] = { E,I,L,rho,A };
+      safeDrawBeam();
+    }
+  } finally { isEditing = false; markSuppressClicks(); toggleCanvasBusy(false); }
+}
+
+function drawBeam() {
+  if (isDrawing) return;
+  isDrawing = true;
+  try {
+    const canvas = beamCanvasEl || document.getElementById("beamCanvas");
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!segments.length) return;
+
+    const margin = MARGIN_X;
+    const midY = canvas.height / 2;
+
+    const totalLength = segments.reduce((sum, seg) => sum + seg.L, 0);
+    const scaleX = (canvas.width - 2 * margin) / totalLength;
+
+    const maxEI = Math.max(...segments.map(seg => seg.E * seg.I));
+    const maxHeight = 0.05 * canvas.height;
+
+    let x = margin;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const width = seg.L * scaleX;
+      const height = (seg.E * seg.I / maxEI) * maxHeight;
+
+      ctx.fillStyle = "#666";
+      ctx.fillRect(x, midY - height / 2, width, height);
+
+      // segment text
+      ctx.fillStyle = "black";
+      ctx.textAlign = "center";
+      const props = [ `E: ${seg.E}`, `I: ${seg.I}`, `L: ${seg.L}`, `ρ: ${seg.rho}`, `A: ${seg.A}` ];
+      const startY = midY + height / 2 + 12;
+      ctx.font = "12px sans-serif";
+      for (let j = 0; j < props.length; j++) ctx.fillText(props[j], x + width / 2, startY + j * 14);
+
+      // nodes at ends
+      if (i === 0) drawNodeFeatures(ctx, x, midY, nodes[0], maxHeight);
+      const rightX = x + width;
+      drawNodeFeatures(ctx, rightX, midY, nodes[i+1], maxHeight);
+
+      x += width;
+    }
+  } finally { isDrawing = false; }
+}
+
+function buildPrimaryNodePositionMap(){
+  const margin = MARGIN_X;
+  const totalLength = segments.reduce((sum, seg) => sum + seg.L, 0) || 1;
+  const scaleX = ((beamCanvasEl||document.getElementById('beamCanvas')).width - 2 * margin) / totalLength;
+  const xs = [];
+  let cumL = 0;
+  xs.push(margin);
+  for (let i=0;i<segments.length;i++){
+    cumL += segments[i].L;
+    xs.push(margin + cumL * scaleX);
+  }
+  const is = xs.map((_,idx)=> idx);
+  return { xs, is };
+}
+
+// ===== Supports / Node graphics =====
+function drawFixedSupport(ctx, x, y) {
+  ctx.save();
+  ctx.strokeStyle = "black";
+  ctx.lineWidth = 2;
+
+  const height = 22;
+  const offset = 6;
+  const hatchDx = 12;
+  const hatchDy = 8;
+  const spacing = 6;
+
+  ctx.beginPath();
+  ctx.moveTo(x - offset, y - height);
+  ctx.lineTo(x - offset, y + height);
+  ctx.stroke();
+
+  for (let yy = y - height; yy <= y + height; yy += spacing){
+    ctx.beginPath();
+    ctx.moveTo(x - offset, yy);
+    ctx.lineTo(x - offset - hatchDx, yy - hatchDy);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawNodeFeatures(ctx, x, y, node = { bc: 'free', W:0, Kv:0, Kr:0, H:0 }, maxEIHeight = 20){
+  ctx.save();
+  ctx.strokeStyle = "black"; ctx.lineWidth = 2; ctx.fillStyle = "black";
+
+  if (node.bc === "pinned") {
+    ctx.beginPath(); ctx.moveTo(x - 15, y + 17); ctx.lineTo(x, y); ctx.lineTo(x + 15, y + 17); ctx.closePath(); ctx.stroke();
+  } else if (node.bc === "fixed") {
+    drawFixedSupport(ctx, x, y);
+  }
+
+  if (node.Kv > 0) {
+    ctx.beginPath(); let springY = y + 8; ctx.moveTo(x, springY);
+    for (let i=0;i<4;i++){ ctx.lineTo(x + (i%2? -6:6), springY += 6); }
+    ctx.lineTo(x, springY + 6); ctx.stroke();
+  }
+  if (node.Kr > 0) {
+    ctx.beginPath();
+    ctx.moveTo(x-35, y-20);
+    ctx.lineTo(x-25, y-20);
+    ctx.lineTo(x-22, y-30);
+    ctx.lineTo(x-16, y-10);
+    ctx.lineTo(x-10, y-30);
+    ctx.lineTo(x-8,  y-20);
+    ctx.lineTo(x,    y-20);
+    ctx.lineTo(x,    y+20);
+    ctx.lineTo(x+8,  y+20);
+    ctx.lineTo(x+10, y+30);
+    ctx.lineTo(x+16, y+10);
+    ctx.lineTo(x+22, y+30);
+    ctx.lineTo(x+25, y+20);
+    ctx.lineTo(x+35, y+20);
+    ctx.stroke();
+  }
+
+  // mass marker + labels
+  const hasW = (node.W && node.W > 0);
+  const r = hasW ? 16 : 8;
+  const lift = (hasW && (Number(node.H)||0) > 0) ? (3 * maxEIHeight) : 0;
+  const yMass = y - lift;
+
+  ctx.beginPath(); ctx.arc(x, yMass, r, 0, Math.PI*2); ctx.fill();
+
+  function fmt(v){
+    if (!isFinite(v)) return '0';
+    const a = Math.abs(v);
+    if (a >= 1000) return v.toFixed(0);
+    if (a >= 100)  return v.toFixed(1);
+    if (a >= 10)   return v.toFixed(2);
+    if (a >= 1)    return v.toFixed(3);
+    if (a >= 0.01) return v.toFixed(4);
+    return v.toExponential(2);
+  }
+  const labels = [];
+  if (Math.abs(Number(node.W)||0)  > 1e-12) labels.push(`W:${fmt(Number(node.W))}`);
+  if (Math.abs(Number(node.H)||0)  > 1e-12) labels.push(`H:${fmt(Number(node.H))}`);
+  if (Math.abs(Number(node.Kv)||0) > 1e-12) labels.push(`Kv:${fmt(Number(node.Kv))}`);
+  if (Math.abs(Number(node.Kr)||0) > 1e-12) labels.push(`Kr:${fmt(Number(node.Kr))}`);
+
+  if (labels.length){
+    const canvas = (ctx.canvas ?? document.getElementById('beamCanvas'));
+    ctx.font = "11px sans-serif";
+    ctx.fillStyle = "#000";
+    ctx.textAlign = "left";
+
+    let tx = x + r + 6;
+    let tyTop = yMass - r - (labels.length-1)*12;
+
+    const maxW = Math.max(...labels.map(t => ctx.measureText(t).width));
+    if (tx + maxW + 4 > canvas.width) tx = Math.max(4, canvas.width - maxW - 4);
+    if (tyTop < 8) tyTop = 8;
+
+    for (let i=0;i<labels.length;i++){
+      ctx.fillText(labels[i], tx, tyTop + i*12);
+    }
+  }
+
+  ctx.restore();
+}
+
+// ===== Interaction on canvas =====
+function attachCanvasHandlers(){
+  const canvas = beamCanvasEl;
+  if (canvasClickHandler) canvas.removeEventListener("click", canvasClickHandler);
+  canvasClickHandler = function(e){
+    const now = performance.now();
+    if (isDrawing || isEditing || now < suppressClicksUntil) return;
+    e.preventDefault(); e.stopPropagation();
+    const rect = canvas.getBoundingClientRect();
+    const xClick = e.clientX - rect.left;
+    const yClick = e.clientY - rect.top;
+
+    const margin = MARGIN_X;
+    const midY = canvas.height/2;
+    const totalLength = segments.reduce((sum, seg) => sum + seg.L, 0);
+    if (totalLength <= 0) return;
+    const scaleX = (canvas.width - 2 * margin) / totalLength;
+    const maxEI = Math.max(...segments.map(seg => seg.E * seg.I)) || 1;
+    const maxHeight = 0.05 * canvas.height;
+
+    const map = buildPrimaryNodePositionMap();
+    const nodeXs = map.xs; const nodeIs = map.is;
+
+    const nodeHitR = 20;
+    for (let k = 0; k < nodeXs.length; k++) {
+      const dx0 = xClick - nodeXs[k];
+      const dy0 = yClick - midY;
+      if (Math.hypot(dx0, dy0) <= nodeHitR) {
+        const idx = nodeIs[k];
+        if (idx >= 0 && idx < nodes.length) { setTimeout(()=>editNode(idx), 0); }
+        return;
+      }
+    }
+
+    let x = margin;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const width = seg.L * scaleX;
+      const height = (seg.E * seg.I / maxEI) * maxHeight;
+      const left = x + nodeHitR + 2;
+      const right = x + width - (nodeHitR + 2);
+      if (right > left) {
+        if (xClick >= left && xClick <= right && yClick >= (midY - height/2 - 10) && yClick <= (midY + height/2 + 10)) {
+          setTimeout(()=>editSegment(i), 0);
+          return;
+        }
+      }
+      x += width;
+    }
+  };
+  canvas.addEventListener("click", canvasClickHandler);
+}
+
+function toggleCanvasBusy(on){
+  const c = beamCanvasEl || document.getElementById('beamCanvas');
+  if (!c) return;
+  if (on) c.classList.add('busy'); else c.classList.remove('busy');
+}
+function markSuppressClicks(){ suppressClicksUntil = performance.now() + 300; }
+
+async function editNode(i) {
+  if (i < 0 || i >= nodes.length) return;
+  if (isEditing) return;
+  isEditing = true; toggleCanvasBusy(true);
+  try {
+    const node = nodes[i] || { bc:'free', W:0, Kv:0, Kr:0, H:0 };
+    const { value: data } = await Swal.fire({
+      title: `Node ${i} Properties`,
+      html:
+        `<label><span>BC:</span><select id=\"bc\" class=\"swal2-select\" style=\"width:90px\">
+         <option value=\"free\" ${node.bc === 'free' ? 'selected' : ''}>Free</option>
+         <option value=\"pinned\" ${node.bc === 'pinned' ? 'selected' : ''}>Simple support (w=0, θ free)</option>
+         <option value=\"fixed\" ${node.bc === 'fixed' ? 'selected' : ''}>Fixed</option>
+       </select></label>
+       <label><span>W:</span><input id=\"W\" class=\"swal2-input\" value=\"${node.W}\"></label>
+       <label><span>Kv:</span><input id=\"Kv\" class=\"swal2-input\" value=\"${node.Kv}\"></label>
+       <label><span>Kr:</span><input id=\"Kr\" class=\"swal2-input\" value=\"${node.Kr}\"></label>
+       <label><span>Drop H:</span><input id=\"H\" class=\"swal2-input\" value=\"${node.H}\"></label>
+       <div class=\"muted\" style=\"max-width:180px;text-align:left;line-height:1.2\">
+         <div>Impact options are set above.</div>
+         <div>Stick: attach mass W/G and conserve momentum.</div>
+         <div>Bounce: restitution e; mass detaches.</div>
+       </div>`,
+      focusConfirm: false,
+      preConfirm: () => [
+        document.getElementById("bc").value,
+        parseFloat(document.getElementById("W").value),
+        parseFloat(document.getElementById("Kv").value),
+        parseFloat(document.getElementById("Kr").value),
+        parseFloat(document.getElementById("H").value)
+      ]
+    });
+    if (data) nodes[i] = { ...nodes[i], bc: data[0], W: (isFinite(data[1])? data[1]:0), Kv: (isFinite(data[2])? data[2]:0), Kr: (isFinite(data[3])? data[3]:0), H: (isFinite(data[4])? data[4]:0) };
+    safeDrawBeam();
+  } finally { isEditing = false; markSuppressClicks(); toggleCanvasBusy(false); }
+}
+
+// ===== Drop-weight transient (RK4 with MODAL structural damping) =====
+let anim = { frames: [], times: [], xs: [], maxAbs: 0, running:false, rafId:0, idx:0, speed:0.5, mode:'stick', dropRef:0, g:386, massY:[], dropXpx:0 };
+
+function computeRefinedXs(){
+  const m = getRefine();
+  const S = segments.length; const xs = [];
+  let x=0; for (let i=0;i<S;i++){ const L=segments[i].L; const sub=m+1; const dx=L/sub; for (let j=0;j<sub;j++){ xs.push(x + j*dx); } x+=L; }
+  xs.push(x);
+  return xs;
+}
+
+function assembleMK(includeDropMassIdx, g){
+  const m = getRefine();
+  const S = segments.length; 
+  const Nn_ref = S * (m + 1) + 1;
+  const dofPerNode = 2; const N = dofPerNode * Nn_ref;
+  const M = numeric.rep([N, N], 0); const K = numeric.rep([N, N], 0);
+  for (let i = 0; i < S; i++) {
+    const seg = segments[i];
+    const EI = seg.E * seg.I;
+    const mu = (seg.rho / g) * seg.A; // mass/length
+    const sub = m + 1; const Lsub = seg.L / sub; const startRef = i * (m + 1);
+    const kcoef = EI / (Lsub*Lsub*Lsub);
+    const a = 12*kcoef, b = 6*Lsub*kcoef, c = 4*Lsub*Lsub*kcoef, d = 2*Lsub*Lsub*kcoef;
+    for (let j = 0; j < sub; j++) {
+      const n1 = startRef + j, n2 = n1 + 1;
+      const dofs = [ 2*n1, 2*n1+1, 2*n2, 2*n2+1 ];
+      const kk = [ [ a,  b, -a,  b], [ b,  c, -b,  d], [ -a, -b,  a, -b], [ b,  d, -b,  c] ];
+      for (let r=0;r<4;r++){ const Kr = kk[r]; for (let s=0;s<4;s++) K[dofs[r]][dofs[s]] += Kr[s]; }
+      const cfac = (mu * Lsub) / 420; const L = Lsub;
+      const mLoc = [ [156, 22*L, 54, -13*L], [22*L, 4*L*L, 13*L, -3*L*L], [54, 13*L, 156, -22*L], [-13*L, -3*L*L, -22*L, 4*L*L] ];
+      for (let r=0;r<4;r++){ const Mr = mLoc[r]; for (let s=0;s<4;s++) M[dofs[r]][dofs[s]] += Mr[s]*cfac; }
+    }
+  }
+  // nodal springs
+  for (let p=0; p<nodes.length; p++){
+    const refIdx = p * (m + 1); const v = 2*refIdx, r = 2*refIdx+1;
+    const Kv = Number(nodes[p].Kv)||0; const Kr = Number(nodes[p].Kr)||0;
+    if (Kv) K[v][v] += Kv; if (Kr) K[r][r] += Kr;
+  }
+  // optional: lumped mass (drop) — only when requested
+  if (includeDropMassIdx != null){
+    const v = includeDropMassIdx;
+    const W = Number(nodes[Math.round(v/2/(m+1))]?.W)||0;
+    if (W){ M[v][v] += W / g; }
+  }
+  return { M, K, N };
+}
+
+function simulateDrop(){
+  console.time('simulateDrop');
+  lastSim = null;
+
+  if (!segments.length) { buildBeam(); return; }
+  const dropNode = nodes.findIndex(nd => (Number(nd.H)||0) > 0);
+  if (dropNode < 0){ Swal.fire('Set drop height','Edit a node and set a positive Drop H.','info'); return; }
+  const W = Number(nodes[dropNode].W)||0; if (W <= 0){ Swal.fire('Missing weight','The drop node needs a positive W (lbf).','info'); return; }
+  const bc = nodes[dropNode].bc; if (bc === 'pinned' || bc === 'fixed'){ Swal.fire('Unsupported location','Drop node vertical DOF is constrained by support. Choose a free node.','error'); return; }
+
+  const g = parseFloat(document.getElementById("gravityInput").value) || 386;
+  const H = Math.max(0, Number(nodes[dropNode].H)||0);
+  const vImpact = Math.sqrt(2*g*H);
+  const m_drop = W / g;
+
+  const m = getRefine();
+  const S = segments.length; 
+  const dropRef = dropNode * (m + 1);
+  const dropVGlob = 2*dropRef;
+
+  // Beam-only M,K for effective mass
+  const { M: M_beam, K, N } = assembleMK(null, g);
+
+  const constrained = new Set();
+  for (let p=0; p<nodes.length; p++){
+    const b = nodes[p].bc; const refIdx = p * (m + 1); const v = 2*refIdx, r = 2*refIdx+1;
+    if (b === 'fixed' || b === 'pinned') { constrained.add(v); if (b === 'fixed') constrained.add(r); }
+  }
+  const free = []; for (let i=0;i<N;i++){ if(!constrained.has(i)) free.push(i); }
+  if (!free.length) { Swal.fire("Error", "All DOFs are constrained."); return; }
+
+  const Mred_beam = submat(M_beam, free);
+  const Kred = submat(K, free);
+  let Minv_beam; try { Minv_beam = numeric.inv(Mred_beam); } catch(e){ Swal.fire('Error','M is singular (beam). Check density/area.','error'); return; }
+
+  const dropIdx = free.indexOf(dropVGlob);
+  if (dropIdx < 0){ Swal.fire('Unsupported location','Chosen drop node is constrained in reduced system.','error'); return; }
+
+  const ei = new Array(free.length).fill(0); ei[dropIdx] = 1;
+  const m_eff = 1 / numeric.dot([ei], numeric.dot(Minv_beam, ei))[0];
+
+  let dt = parseFloat(document.getElementById('dtInput').value);
+  let T  = parseFloat(document.getElementById('durInput').value);
+  const zeta_all = Math.max(0, parseFloat(document.getElementById('zetaInput').value)||0) / 100.0;
+  if (!isFinite(dt) || dt <= 0) { Swal.fire('Invalid Δt', 'Provide a positive time step.', 'error'); return; }
+  if (!isFinite(T)  || T  <= 0) { Swal.fire('Invalid duration', 'Provide a positive total time.', 'error'); return; }
+
+  const mode = document.getElementById('impactMode').value;
+  const e = Math.max(0, Math.min(1, parseFloat(document.getElementById('eInput').value)||0));
+
+  let J;
+  if (mode === 'stick') {
+    J = (m_eff * m_drop / (m_eff + m_drop)) * vImpact;
+  } else {
+    J = (1 + e) * (m_eff * m_drop / (m_eff + m_drop)) * vImpact;
+  }
+
+  let q0 = Array(free.length).fill(0);
+  let v0 = numeric.dot(Minv_beam, ei.map(x=> x*J));
+
+  let M_used = M_beam; let F_full = new Array(N).fill(0);
+  if (mode === 'stick'){
+    M_used = numeric.clone(M_beam);
+    M_used[dropVGlob][dropVGlob] += m_drop;
+    F_full[dropVGlob] += W;
+  }
+
+  const Mred = submat(M_used, free);
+
+  let A; try { A = numeric.dot(numeric.inv(Mred), Kred); } catch(e){ Swal.fire('Error','M is singular during modal decomposition.','error'); return; }
+  let eig; try { eig = numeric.eig(A); } catch(e){ Swal.fire('Error','Eigen decomposition failed; try fewer segments or larger Δt.','error'); return; }
+  const vals = eig.lambda.x; const vecsR = eig.E.x;
+
+  const pairs = [];
+  for (let j=0;j<vals.length;j++){
+    if (Math.abs(eig.lambda.y?.[j]||0) < 1e-8 && vals[j] > 1e-12){
+      const phi = vecsR.map(row => row[j]);
+      const m_j = numeric.dot([phi], numeric.dot(Mred, phi))[0];
+      if (m_j <= 0 || !isFinite(m_j)) continue;
+      const phi_n = phi.map(v => v / Math.sqrt(m_j));
+      const w2 = numeric.dot([phi_n], numeric.dot(Kred, phi_n))[0];
+      const w = Math.sqrt(Math.max(w2, 0));
+      if (isFinite(w)) pairs.push({ w, phi: phi_n });
+    }
+  }
+  pairs.sort((a,b)=> a.w - b.w);
+  const p = Math.min(8, pairs.length);
+  if (p === 0){ Swal.fire('Error','No usable modes found.','error'); return; }
+  const Wvec = new Array(p); const PHI = new Array(p);
+  for (let j=0;j<p;j++){ Wvec[j] = pairs[j].w; PHI[j] = pairs[j].phi; }
+
+  function Mmul(vec){ return numeric.dot(Mred, vec); }
+  function PHIT_M_vec(vec){
+    const Mv = Mmul(vec); const y = new Array(p).fill(0);
+    for (let j=0;j<p;j++) y[j] = numeric.dot([PHI[j]], Mv)[0];
+    return y;
+  }
+  function PHI_times_y(y){
+    const q = new Array(free.length).fill(0);
+    for (let j=0;j<p;j++){
+      const cj = y[j]; if (!cj) continue;
+      const ph = PHI[j]; for (let i=0;i<q.length;i++) q[i] += ph[i]*cj;
+    }
+    return q;
+  }
+  const Fred = free.map(i => F_full[i]||0);
+  const f_modal = (function(){
+    const y = new Array(p).fill(0);
+    const FF = Fred;
+    for (let j=0;j<p;j++) y[j] = numeric.dot([PHI[j]], FF)[0];
+    return y;
+  })();
+
+  const y0  = new Array(p).fill(0);
+  const yd0 = PHIT_M_vec(v0);
+
+  const steps = Math.max(10, Math.floor(T/dt));
+  if (steps > 200000) { Swal.fire('Too many steps', `T/dt = ${steps.toLocaleString()} steps. Increase Δt or reduce T.`, 'warning'); return; }
+
+  const ts = new Array(steps+1); const ys_drop = new Array(steps+1);
+  ts[0] = 0;
+
+  let y = y0.slice();
+  let yd = yd0.slice();
+
+  function sdofAcc(j, yj, ydj){ return f_modal[j] - 2*zeta_all*Wvec[j]*ydj - (Wvec[j]*Wvec[j])*yj; }
+
+  stopAnimation();
+  const xsRef = computeRefinedXs();
+  const frames = []; const times = [];
+  let maxAbs = 0; const stride = Math.max(1, Math.floor(steps/300));
+
+  const Nglob = 2 * xsRef.length;
+  const mapRed = new Int32Array(Nglob).fill(-1);
+  for (let i = 0; i < free.length; i++) mapRed[free[i]] = i;
+  const drop_r = free.indexOf(dropVGlob);
+
+  const nodeNames = Array(nodes.length).fill(0).map((_,i)=>`w_node${i}`);
+  const nodeW = Array(nodes.length).fill(0).map(()=> new Array(steps+1).fill(0));
+
+  let massY = new Array(steps+1).fill(0);
+  let v_m_post = 0;
+  if (mode === 'bounce'){
+    v_m_post = ((m_drop - e*m_eff)/(m_drop + m_eff)) * vImpact;
+  }
+
+  let q = PHI_times_y(y);
+  ys_drop[0] = (drop_r>=0 ? q[drop_r] : 0);
+  for (let pnode=0;pnode<nodes.length;pnode++){
+    const ref = pnode*(m+1); const gi = 2*ref; const ri = mapRed[gi];
+    nodeW[pnode][0] = (ri>=0 ? q[ri] : 0);
+  }
+
+  for (let k=0; k<steps; k++){
+    const k1y  = yd.slice();
+    const k1yd = y.map((yj,j)=> sdofAcc(j, y[j], yd[j]));
+
+    const y2  = y.map((yj,j)=> yj  + 0.5*dt*k1y[j]);
+    const yd2 = yd.map((vj,j)=> vj + 0.5*dt*k1yd[j]);
+    const k2y  = yd2;
+    const k2yd = y2.map((yj,j)=> sdofAcc(j, y2[j], yd2[j]));
+
+    const y3  = y.map((yj,j)=> yj  + 0.5*dt*k2y[j]);
+    const yd3 = yd.map((vj,j)=> vj + 0.5*dt*k2yd[j]);
+    const k3y  = yd3;
+    const k3yd = y3.map((yj,j)=> sdofAcc(j, y3[j], yd3[j]));
+
+    const y4  = y.map((yj,j)=> yj  + dt*k3y[j]);
+    const yd4 = yd.map((vj,j)=> vj + dt*k3yd[j]);
+    const k4y  = yd4;
+    const k4yd = y4.map((yj,j)=> sdofAcc(j, y4[j], yd4[j]));
+
+    for (let j=0;j<p;j++){
+      y[j]  += (dt/6)*(k1y[j]  + 2*k2y[j]  + 2*k3y[j]  + k4y[j]);
+      yd[j] += (dt/6)*(k1yd[j] + 2*k2yd[j] + 2*k3yd[j] + k4yd[j]);
+    }
+
+    const tnext = (k+1)*dt; ts[k+1] = tnext;
+
+    q = PHI_times_y(y);
+    ys_drop[k+1] = (drop_r>=0 ? q[drop_r] : 0);
+
+    for (let pnode=0;pnode<nodes.length;pnode++){
+      const ref = pnode*(m+1); const gi = 2*ref; const ri = mapRed[gi];
+      nodeW[pnode][k+1] = (ri>=0 ? q[ri] : 0);
+    }
+
+    if (mode === 'bounce'){
+      massY[k+1] = v_m_post * tnext - 0.5 * g * tnext * tnext;
+    }
+
+    if (k % stride === 0 || k === steps-1){
+      const Nn_ref = xsRef.length; const w = new Float32Array(Nn_ref);
+      for (let n=0;n<Nn_ref;n++){
+        const gi = 2*n; const ri = mapRed[gi];
+        w[n] = (ri>=0)? q[ri] : 0; 
+        maxAbs = Math.max(maxAbs, Math.abs(w[n]));
+      }
+      frames.push(w); times.push(tnext);
+    }
+  }
+
+  renderDropSummary({ node: dropNode, H, vImpact, dt, T, peak: Math.max(...ys_drop.map(Math.abs)), mode, e, zeta_all });
+  drawTimeHistory(ts, ys_drop);
+
+  const margin = MARGIN_X; 
+  const totalL = segments.reduce((s,seg)=> s+seg.L, 0) || 1; 
+  const scaleX = (document.getElementById('animCanvas').width - 2*margin)/totalL;
+  anim.frames = frames; anim.times = times; anim.xs = xsRef; anim.maxAbs = maxAbs || 1; anim.idx = 0; anim.mode = mode; anim.dropRef = dropRef; anim.g = g;
+  anim.massY = (mode==='bounce') ? massY.filter((_,i)=> (i % Math.max(1, Math.floor(steps/frames.length))) === 0) : new Array(frames.length).fill(0);
+  anim.dropXpx = margin + (xsRef[dropRef]||0) * scaleX;
+  startAnimation();
+
+  lastSim = { ts, wDrop: ys_drop, nodeNames, nodeW };
+
+  console.timeEnd('simulateDrop');
+}
+
+// ===== 1st mode frequency computation (no dropped weight) =====
+function computeFirstMode(){
+  const outEl = document.getElementById('freqOutput');
+  if (outEl) outEl.value = '';
+
+  if (!segments.length) {
+    buildBeam();
+  }
+  const g = parseFloat(document.getElementById("gravityInput").value) || 386;
+
+  // Beam-only M, K (no attached drop mass)
+  const { M, K, N } = assembleMK(null, g);
+
+  const mRef = getRefine();
+  const constrained = new Set();
+  for (let p=0; p<nodes.length; p++){
+    const b = nodes[p].bc;
+    const refIdx = p * (mRef + 1);
+    const v = 2*refIdx;
+    const r = 2*refIdx + 1;
+    if (b === 'fixed' || b === 'pinned') constrained.add(v);
+    if (b === 'fixed') constrained.add(r);
+  }
+
+  const free = [];
+  for (let i=0; i<N; i++){
+    if (!constrained.has(i)) free.push(i);
+  }
+  if (!free.length){
+    Swal.fire('Error','All DOFs are constrained; cannot compute modes.','error');
+    return;
+  }
+
+  const Mred = submat(M, free);
+  const Kred = submat(K, free);
+
+  let A, eig;
+  try {
+    const Minv = numeric.inv(Mred);
+    A = numeric.dot(Minv, Kred);
+    eig = numeric.eig(A);
+  } catch (e){
+    Swal.fire('Error','Failed to compute eigenvalues (singular M or numeric issue).','error');
+    return;
+  }
+
+  const lamR = eig.lambda.x;
+  const lamI = eig.lambda.y || [];
+  let w1 = null;
+
+  for (let i=0; i<lamR.length; i++){
+    const re = lamR[i];
+    const im = lamI[i] || 0;
+    if (Math.abs(im) > 1e-6) continue;
+    if (re <= 1e-8) continue;
+    const w = Math.sqrt(re);
+    if (!isFinite(w)) continue;
+    if (w1 === null || w < w1) w1 = w;
+  }
+
+  if (w1 === null){
+    Swal.fire('Error','No positive real eigenvalues found.','error');
+    return;
+  }
+
+  const f1 = w1 / (2*Math.PI);
+  if (outEl){
+    outEl.value = f1.toFixed(3);
+    outEl.title = `ω₁ ≈ ${w1.toFixed(3)} rad/s`;
+  }
+}
+
+function startAnimation(){
+  const btn = document.getElementById('btnAnimToggle');
+  const status = document.getElementById('animStatus');
+  if (!anim.frames.length){ status.textContent='(no frames)'; return; }
+  if (anim.running) return; anim.running = true; btn.textContent='Pause'; status.textContent='';
+  const step = () => {
+    if (!anim.running) return;
+    drawAnimFrame(Math.floor(anim.idx));
+    anim.idx += Math.max(0.01, anim.speed);
+    if (anim.idx >= anim.frames.length) anim.idx = 0;
+    anim.rafId = requestAnimationFrame(step);
+  };
+  anim.rafId = requestAnimationFrame(step);
+}
+function stopAnimation(){
+  if (anim.running){ cancelAnimationFrame(anim.rafId); anim.running=false; }
+  const btn=document.getElementById('btnAnimToggle');
+  if (btn) btn.textContent='Play';
+}
+
+function drawAnimFrame(i){
+  const canvas = document.getElementById('animCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0,0,canvas.width, canvas.height);
+  const margin = MARGIN_X; const midY = canvas.height/2;
+  const totalL = segments.reduce((s,seg)=> s+seg.L, 0) || 1;
+  const scaleX = (canvas.width - 2*margin)/totalL;
+  const scaleY = (canvas.height*0.40) / anim.maxAbs;
+  const xs = anim.xs; const w = anim.frames[i];
+
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(margin, midY); ctx.lineTo(margin + totalL*scaleX, midY); ctx.stroke();
+
+  ctx.strokeStyle = '#1f77b4'; ctx.lineWidth = 2; ctx.beginPath();
+  for (let k=0;k<xs.length;k++){
+    const X = margin + xs[k]*scaleX;
+    const Y = midY - w[k]*scaleY;
+    if (k===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
+  }
+  ctx.stroke();
+
+  const Xc = anim.dropXpx; const wNode = w[anim.dropRef] || 0;
+  let Ymass = midY - wNode*scaleY;
+  if (anim.mode === 'bounce'){
+    const idx = Math.min(i, anim.massY.length-1);
+    Ymass = midY - (wNode + anim.massY[idx]) * scaleY;
+  }
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(Xc, Ymass, 16, 0, Math.PI*2); ctx.fill();
+
+  const t = (anim.times && anim.times.length) ? (anim.times[Math.max(0, Math.min(i, anim.times.length-1))]) : 0;
+  const label = `t = ${Number(t).toFixed(3)} s`;
+  ctx.font = '12px sans-serif';
+  const pad = 6; const boxH = 18; const wText = ctx.measureText(label).width;
+  const boxW = wText + 2*pad; const x = canvas.width - boxW - 10; const y = 10;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fillRect(x, y, boxW, boxH);
+  ctx.strokeStyle = '#444'; ctx.strokeRect(x, y, boxW, boxH);
+  ctx.fillStyle = '#000'; ctx.fillText(label, x + pad, y + boxH - 6);
+}
+
+function renderDropSummary(info){
+  const div = document.getElementById('dropSummary');
+  if (!info){ div.textContent=''; return; }
+  div.innerHTML = `<strong>Drop Simulation:</strong> H=${info.H.toFixed(3)}, v₀=${info.vImpact.toFixed(3)}, e=${info.e.toFixed(2)}, dt=${info.dt.toExponential(2)}, T=${info.T.toFixed(2)}, ζ=${(info.zeta_all*100).toFixed(1)}%, peak |w|≈${info.peak.toFixed(4)}`;
+}
+
+function drawTimeHistory(ts, ys){
+  const el = document.getElementById('timePlot');
+  const ctx = el.getContext('2d');
+  if (timeChart){ timeChart.destroy(); timeChart = null; }
+  if (!ts.length){ ctx.clearRect(0,0,el.width, el.height); return; }
+  const series = ts.map((t,i)=> ({ x: +t, y: ys[i] }));
+  timeChart = new Chart(ctx, {
+    type: 'line',
+    data: { datasets: [{ label: 'w_drop (at node)', data: series, borderWidth: 2, pointRadius: 0, fill:false }] },
+    options: {
+      responsive:false,
+      scales: { x:{ type:'linear', title:{ display:true, text:'time (s)' } }, y:{ title:{ display:true, text:'deflection'} } },
+      plugins:{ tooltip:{ callbacks:{ label:(ctx)=>`w = ${Number(ctx.parsed.y).toFixed(4)}`, title:(items)=>`t = ${Number(items[0]?.parsed?.x).toFixed(3)} s` } } }
+    }
+  });
+}
+
+// ===== CSV Export =====
+function exportCSV(){
+  if (!lastSim){ Swal.fire('No data','Run a simulation first.','info'); return; }
+  const { ts, wDrop, nodeNames, nodeW } = lastSim;
+  const headers = ['time','w_drop', ...nodeNames];
+  const rows = [headers.join(',')];
+
+  for (let i=0;i<ts.length;i++){
+    const row = [ts[i], wDrop[i]];
+    for (let n=0;n<nodeW.length;n++) row.push(nodeW[n][i]);
+    rows.push(row.join(','));
+  }
+  const blob = new Blob([rows.join('\n')], {type: 'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'beam_drop_history.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ===== Helpers =====
+function submat(mat, idx){ return idx.map(i => idx.map(j => mat[i][j])); }
+function vecDot(a,b){ let s=0; for (let i=0;i<a.length;i++) s+=a[i]*b[i]; return s; }
+function l2norm(v){ let s=0; for (let i=0;i<v.length;i++) s+=v[i]*v[i]; return Math.sqrt(s); }
+
+// ===== DOM wiring =====
+document.addEventListener('DOMContentLoaded', () => {
+  beamCanvasEl = document.getElementById('beamCanvas');
+  attachCanvasHandlers();
+  document.getElementById('btnBuild').addEventListener('click', buildBeam);
+  document.getElementById('btnDrop').addEventListener('click', simulateDrop);
+  document.getElementById('btnExport').addEventListener('click', exportCSV);
+  document.getElementById('btnFreq').addEventListener('click', computeFirstMode);
+
+  const btnAnim = document.getElementById('btnAnimToggle');
+  const rng = document.getElementById('animSpeed');
+  btnAnim.addEventListener('click', ()=>{ if (anim.running) stopAnimation(); else startAnimation(); });
+  rng.addEventListener('input', ()=>{ anim.speed = parseFloat(rng.value)||0.5; });
+  anim.speed = parseFloat(rng.value)||0.5;
+
+  const modeSel = document.getElementById('impactMode');
+  const eInput = document.getElementById('eInput');
+  const setEState = ()=>{ eInput.disabled = (modeSel.value !== 'bounce'); };
+  modeSel.addEventListener('change', setEState); setEState();
+
+  buildBeam();
+});
+
+// ===== Test cases (helpers) =====
+function testCantileverStick(){
+  const S = 4; document.getElementById('numSegments').value = S;
+  segments = Array(S).fill(0).map(()=> ({E: 12e6, I: 21.3, L: 96/S, rho: 0.28, A: 2.0}));
+  nodes = Array(S+1).fill(0).map(()=>({bc:'free', W:0, Kv:0, Kr:0, H:0}));
+  nodes[0].bc = 'fixed';
+  const tip=S; nodes[tip].W = 100; nodes[tip].H = 2.0;
+  document.getElementById('impactMode').value='stick';
+  document.getElementById('zetaInput').value=2.0;
+  safeDrawBeam(); simulateDrop();
+}
+function testCantileverBounce(){
+  const S = 4; document.getElementById('numSegments').value = S;
+  segments = Array(S).fill(0).map(()=> ({E: 12e6, I: 21.3, L: 96/S, rho: 0.28, A: 2.0}));
+  nodes = Array(S+1).fill(0).map(()=>({bc:'free', W:0, Kv:0, Kr:0, H:0}));
+  nodes[0].bc = 'fixed';
+  const tip=S; nodes[tip].W = 100; nodes[tip].H = 2.0;
+  document.getElementById('impactMode').value='bounce'; document.getElementById('eInput').value=0.5;
+  document.getElementById('zetaInput').value=2.0;
+  safeDrawBeam(); simulateDrop();
+}
+window.testCantileverStick = testCantileverStick;
+window.testCantileverBounce = testCantileverBounce;
+</script>
+
+<!-- ===== Auto-height messaging to Turbify parent ===== -->
+<script>
+function sendHeight() {
+  var h = document.body.scrollHeight;
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ iframeHeight: h }, "*");
+  }
+}
+
+window.addEventListener("load", sendHeight);
+if (typeof ResizeObserver !== "undefined") {
+  new ResizeObserver(sendHeight).observe(document.body);
+}
+</script>
+
+</body>
+</html>

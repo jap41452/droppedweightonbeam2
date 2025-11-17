@@ -65,22 +65,29 @@
   </div>
 
   <div class="toolbar" id="row2">
-    <label><span class="field-text">Gravity (G):</span> <input id="gravityInput" type="number" value="386"></label>
-    <label><span class="field-text">Δt (s):</span> <input id="dtInput" type="number" min="1e-6" step="0.0001" value="0.001" style="width:64px"></label>
-    <label><span class="field-text">T (s):</span> <input id="durInput" type="number" min="0.01" step="0.01" value="1.5" style="width:64px"></label>
+  <label><span class="field-text">Gravity (G):</span> <input id="gravityInput" type="number" value="386"></label>
+  <label><span class="field-text">Δt (s):</span> <input id="dtInput" type="number" min="1e-6" step="0.0001" value="0.001" style="width:64px"></label>
+  <label><span class="field-text">T (s):</span> <input id="durInput" type="number" min="0.01" step="0.01" value="1.5" style="width:64px"></label>
 
-    <label><span class="field-text">Impact:</span>
-      <select id="impactMode">
-        <option value="stick">Stick (e=0)</option>
-        <option value="bounce">Bounce (e&gt;0)</option>
-      </select>
-    </label>
-    <label><span class="field-text">e:</span> <input id="eInput" type="number" min="0" max="1" step="0.01" value="0.5" style="width:54px"></label>
-    <label><span class="field-text">ζ (%):</span> <input id="zetaInput" type="number" min="0" step="0.1" value="2.0" style="width:54px"></label>
+  <label><span class="field-text">Impact:</span>
+    <select id="impactMode">
+      <option value="stick">Stick (e=0)</option>
+      <option value="bounce">Bounce (e&gt;0)</option>
+    </select>
+  </label>
+  <label><span class="field-text">e:</span> <input id="eInput" type="number" min="0" max="1" step="0.01" value="0.5" style="width:54px"></label>
+  <label><span class="field-text">ζ (%):</span> <input id="zetaInput" type="number" min="0" step="0.1" value="2.0" style="width:54px"></label>
+</div>
 
-    <button id="btnDrop">Simulate Drop</button>
-    <button id="btnExport">Export CSV</button>
-  </div>
+<!-- New row just for the buttons -->
+<div class="toolbar" id="row3">
+  <button id="btnDrop">Simulate Drop</button>
+  <button id="btnExport">Export CSV</button>
+</div>
+  
+
+
+
 
   <canvas id="beamCanvas" width="800" height="220"></canvas>
   <div id="dropSummary" class="results"></div>
@@ -935,4 +942,5 @@ if (typeof ResizeObserver !== "undefined") {
 
 </body>
 </html>
+
 
